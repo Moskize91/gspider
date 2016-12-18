@@ -9,6 +9,7 @@ import (
 )
 
 type TaskConfiguration struct {
+    TaskBufferConfiguration        TaskBufferConfiguration
     TaskListener                   func(target interface{}) (interface{}, error)
     EventListeners                 map[int]func(event TaskEvent)
     MinThreadsCount                int
@@ -40,6 +41,7 @@ type task struct {
 
 type TaskHandler struct {
     configuration                         TaskConfiguration
+    buffer                                *taskBuffer
     lock                                  sync.Mutex
     waitingTasksCount                     int
     planRunningThreadsCount               int
@@ -62,11 +64,13 @@ type TaskEvent struct {
 
 func DefaultTaskConfiguration() TaskConfiguration {
     return TaskConfiguration{
-        TaskListener: func(target interface{}) (interface{}, error) { return nil, nil },
+        TaskListener: func(target interface{}) (interface{}, error) {
+            return nil, nil
+        },
         EventListeners: make(map[int]func(event TaskEvent)),
         MinThreadsCount: 1,
         MaxThreadsCount: 5,
-        BufferLength: 20,
+        BufferLength: 1,
         ThresholdOfIncreaseThreads: 6,
         ThresholdOfDecreaseThreads: 2,
         ModifyThreadsCountTimeInterval: 5 * time.Second,
@@ -74,7 +78,7 @@ func DefaultTaskConfiguration() TaskConfiguration {
 }
 
 func CreateTaskHandler(configuration TaskConfiguration) *TaskHandler {
-    configuration.EventListeners = copy(make(map[int]func(event TaskEvent)), configuration.EventListeners)
+    standardizeTaskConfiguration(&configuration)
     taskHandler := &TaskHandler{
         configuration: configuration,
         waitingTasksCount: 0,
@@ -89,6 +93,14 @@ func CreateTaskHandler(configuration TaskConfiguration) *TaskHandler {
         finishDestroyNotification: make(chan bool, 1),
         didDestroy: false,
     }
+
+    bufferConfiguration := configuration.TaskBufferConfiguration
+    if bufferConfiguration.used {
+        buffer := createTaskBuffer(bufferConfiguration, taskHandler.tasksChan, func(delta int) {
+            taskHandler.increaseWaitingTasksCountAndNotify(delta)
+        })
+        taskHandler.buffer = buffer
+    }
     go taskHandler.scheduleLoop()
     go taskHandler.eventLoop()
 
@@ -100,20 +112,33 @@ func CreateTaskHandler(configuration TaskConfiguration) *TaskHandler {
 
 func (taskHandler *TaskHandler) AddTask(target interface{}) {
     if !taskHandler.didDestroy {
-        taskHandler.tasksChan <- target
-        taskHandler.increaseWaitingTasksCountAndNotify()
+        bufferConfiguration := taskHandler.configuration.TaskBufferConfiguration
+        if bufferConfiguration.used {
+            taskHandler.buffer.inputChan <- target
+        } else {
+            taskHandler.tasksChan <- target
+            taskHandler.increaseWaitingTasksCountAndNotify(+1)
+        }
     }
 }
 
 func (taskHandler *TaskHandler) Destroy() {
     if !taskHandler.didDestroy {
+        taskHandler.didDestroy = true
+        if taskHandler.configuration.TaskBufferConfiguration.used {
+            taskHandler.buffer.destroy()
+        }
         taskHandler.destroyNotification <- true
         <-taskHandler.finishDestroyNotification // waiting for thread destroyed.
     }
 }
 
-func (taskHandler *TaskHandler) increaseWaitingTasksCountAndNotify() {
-    result := atomic.AddInt32(&taskHandler.waitingTasksCount, +1)
+func standardizeTaskConfiguration(configuration *TaskConfiguration) {
+    configuration.EventListeners = copy(make(map[int]func(event TaskEvent)), configuration.EventListeners)
+}
+
+func (taskHandler *TaskHandler) increaseWaitingTasksCountAndNotify(delta int) {
+    result := atomic.AddInt32(&taskHandler.waitingTasksCount, delta)
     select { // clean original notification.
     case <-taskHandler.waitingTasksCountIncreaseNotification:
     default:
@@ -245,12 +270,9 @@ func (taskHandler *TaskHandler) handleEvent(taskEvent TaskEvent) {
 }
 
 func (taskHandler *TaskHandler) destroy() {
-    if !taskHandler.didDestroy {
-        taskHandler.didDestroy = true
-        for taskHandler.planRunningThreadsCount > 0 {
-            taskHandler.handlersChan <- task{state: deleteThread}
-            taskHandler.planRunningThreadsCount--
-        }
+    for taskHandler.planRunningThreadsCount > 0 {
+        taskHandler.handlersChan <- task{state: deleteThread}
+        taskHandler.planRunningThreadsCount--
     }
 }
 

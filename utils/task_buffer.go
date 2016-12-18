@@ -3,14 +3,19 @@ package utils
 import "sync/atomic"
 
 type TaskBufferConfiguration struct {
+    used          bool
+    // InputHandler can only increase count or keep count.
     InputHandler  func(target interface{})
+    // OutputHandler decrease count -1 once.
     OutputHandler func() (interface{}, bool)
-    BufferLength  int
+    // can't modify returning value unless called InputHandler or OutputHandler.
     CountFunc     func() int
+    BufferLength  int
 }
 
 func DefaultTaskBufferConfiguration() TaskBufferConfiguration {
     return TaskBufferConfiguration{
+        used: true,
         InputHandler: func(target interface{}) {},
         OutputHandler: func() (interface{}, bool) {
             return nil, false
@@ -25,20 +30,20 @@ type taskBuffer struct {
     outputChan                chan interface{}
     destroyNotification       chan bool
     finishDestroyNotification chan bool
-    afterOutputFunc           func()
+    countDidIncrease          func(delta int)
     count                     int
     didDestroy                bool
     configuration             TaskBufferConfiguration
 }
 
-func createTaskBuffer(configuration TaskBufferConfiguration, outputChan chan interface{}, afterOutputFunc func()) *taskBuffer {
+func createTaskBuffer(configuration TaskBufferConfiguration, outputChan chan interface{}, countDidIncrease func(delta int)) *taskBuffer {
     inputChan := make(chan interface{}, configuration.BufferLength)
     buffer := taskBuffer{
         inputChan: inputChan,
         outputChan: outputChan,
         destroyNotification: make(chan bool, 1),
         finishDestroyNotification: make(chan bool, 1),
-        afterOutputFunc: afterOutputFunc,
+        countDidIncrease: countDidIncrease,
         count: 0,
         configuration: configuration,
     }
@@ -49,9 +54,7 @@ func createTaskBuffer(configuration TaskBufferConfiguration, outputChan chan int
 
 func (buffer *taskBuffer) handleLoop() {
 
-    inputHandler := buffer.configuration.InputHandler
     outputHandler := buffer.configuration.OutputHandler
-    afterOutputFunc := buffer.afterOutputFunc
     willInputNow := true
 
     var outputTarget interface{}
@@ -66,8 +69,7 @@ func (buffer *taskBuffer) handleLoop() {
                     return
 
                 case inputTarget := <-buffer.inputChan:
-                    atomic.AddInt32(&buffer.count, +1)
-                    inputHandler(inputTarget)
+                    buffer.handleInputTarget(inputTarget)
 
                 default: // buffer could be consumed. we can't block it here.
                 }
@@ -77,8 +79,7 @@ func (buffer *taskBuffer) handleLoop() {
                     return
 
                 case inputTarget := <-buffer.inputChan:
-                    atomic.AddInt32(&buffer.count, +1)
-                    inputHandler(inputTarget)
+                    buffer.handleInputTarget(inputTarget)
                 }
             }
         } else {
@@ -97,17 +98,29 @@ func (buffer *taskBuffer) handleLoop() {
                 case buffer.outputChan <- outputTarget:
                     outputTarget = nil
                     exists = false
-                    afterOutputFunc()
 
                 case inputTarget := <-buffer.inputChan:
-                    atomic.AddInt32(&buffer.count, +1)
-                    inputHandler(inputTarget)
+                    buffer.handleInputTarget(inputTarget)
                     willInputNow = false
                 }
             }
         }
     }
     buffer.finishDestroyNotification <- true
+}
+
+func (buffer *taskBuffer) handleInputTarget(inputTarget interface{}) {
+
+    inputHandler := buffer.configuration.InputHandler
+    countDidIncrease := buffer.countDidIncrease
+
+    const originalCount = buffer.count()
+    atomic.AddInt32(&buffer.count, +1)
+    inputHandler(inputTarget)
+    const currentCount = buffer.count()
+    if currentCount > originalCount {
+        countDidIncrease(currentCount - originalCount)
+    }
 }
 
 func (buffer *taskBuffer) count() int {
