@@ -5,6 +5,7 @@ import (
     "sync"
     "sync/atomic"
     "math"
+    "runtime"
 )
 
 type TaskConfiguration struct {
@@ -16,17 +17,6 @@ type TaskConfiguration struct {
     ThresholdOfIncreaseThreads     int
     ThresholdOfDecreaseThreads     int
     ModifyThreadsCountTimeInterval time.Duration
-}
-
-func DefaultTaskConfiguration() TaskConfiguration {
-    return TaskConfiguration{
-        MinThreadsCount: 1,
-        MaxThreadsCount: 5,
-        BufferLength: 20,
-        ThresholdOfIncreaseThreads: 6,
-        ThresholdOfDecreaseThreads: 2,
-        ModifyThreadsCountTimeInterval: 5 * time.Second,
-    }
 }
 
 const (
@@ -71,6 +61,17 @@ type TaskEvent struct {
     Target    interface{}
 }
 
+func DefaultTaskConfiguration() TaskConfiguration {
+    return TaskConfiguration{
+        MinThreadsCount: 1,
+        MaxThreadsCount: 5,
+        BufferLength: 20,
+        ThresholdOfIncreaseThreads: 6,
+        ThresholdOfDecreaseThreads: 2,
+        ModifyThreadsCountTimeInterval: 5 * time.Second,
+    }
+}
+
 func CreateTaskHandler(configuration TaskConfiguration, handler func(interface{}) error) *TaskHandler {
     taskHandler := &TaskHandler{
         configuration: configuration,
@@ -89,7 +90,34 @@ func CreateTaskHandler(configuration TaskConfiguration, handler func(interface{}
     }
     go taskHandler.scheduleLoop()
     go taskHandler.eventLoop()
+
+    runtime.SetFinalizer(taskHandler, func() {
+        taskHandler.Destroy()
+    })
     return taskHandler
+}
+
+func (taskHandler *TaskHandler) AddTask(target interface{}) {
+    if !taskHandler.didDestroy {
+        taskHandler.tasksChan <- target
+        taskHandler.increaseWaitingTasksCountAndNotify()
+    }
+}
+
+func (taskHandler *TaskHandler) Destroy() {
+    if !taskHandler.didDestroy {
+        taskHandler.destroyNotification <- true
+        <-taskHandler.finishDestroyNotification // waiting for thread destroyed.
+    }
+}
+
+func (taskHandler *TaskHandler) increaseWaitingTasksCountAndNotify() {
+    result := atomic.AddInt32(&taskHandler.waitingTasksCount, +1)
+    select { // clean original notification.
+    case <-taskHandler.waitingTasksCountIncreaseNotification:
+    default:
+    }
+    taskHandler.waitingTasksCountIncreaseNotification <- result
 }
 
 func (taskHandler *TaskHandler) updateModifyThreadsCountTimestamp() {
@@ -212,17 +240,7 @@ func (taskHandler *TaskHandler) destroy() {
             taskHandler.handlersChan <- task{state: deleteThread}
             taskHandler.planRunningThreadsCount--
         }
-        <-taskHandler.finishDestroyNotification // waiting for thread destroyed.
     }
-}
-
-func (taskHandler *TaskHandler) increaseWaitingTasksCountAndNotify() {
-    result := atomic.AddInt32(&taskHandler.waitingTasksCount, +1)
-    select { // clean original notification.
-    case <-taskHandler.waitingTasksCountIncreaseNotification:
-    default:
-    }
-    taskHandler.waitingTasksCountIncreaseNotification <- result
 }
 
 func (taskHandler *TaskHandler) increaseRunningThreadsCountLock(delta int) {
