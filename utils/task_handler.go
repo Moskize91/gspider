@@ -10,7 +10,7 @@ import (
 
 type TaskConfiguration struct {
     TaskListener                   func(target interface{}) (interface{}, error)
-    EventListener                  func(event TaskEvent)
+    EventListeners                 map[int]func(event TaskEvent)
     MinThreadsCount                int
     MaxThreadsCount                int
     BufferLength                   int
@@ -63,6 +63,8 @@ type TaskEvent struct {
 
 func DefaultTaskConfiguration() TaskConfiguration {
     return TaskConfiguration{
+        TaskListener: func(target interface{}) (interface{}, error) { return nil, nil },
+        EventListeners: make(map[int]func(event TaskEvent)),
         MinThreadsCount: 1,
         MaxThreadsCount: 5,
         BufferLength: 20,
@@ -73,6 +75,7 @@ func DefaultTaskConfiguration() TaskConfiguration {
 }
 
 func CreateTaskHandler(configuration TaskConfiguration, handler func(interface{}) error) *TaskHandler {
+    configuration.EventListeners = copy(make(map[int]func(event TaskEvent)), configuration.EventListeners)
     taskHandler := &TaskHandler{
         configuration: configuration,
         handler:  handler,
@@ -217,11 +220,10 @@ func (taskHandler *TaskHandler) createNewThread() {
 
 func (taskHandler *TaskHandler) eventLoop() {
     eventChan := taskHandler.eventChan
-    eventListener := taskHandler.configuration.EventListener
-    eventListener(TaskEvent{EventType:Setup})
+    taskHandler.handleEvent(TaskEvent{EventType:Setup})
     for true {
         taskEvent := <-eventChan
-        eventListener(taskEvent)
+        taskHandler.handleEvent(taskEvent)
         if taskEvent.EventType == ThreadsCountChanged {
             var runningThreadsCount int = taskEvent.Target
             if runningThreadsCount == 0 {
@@ -229,8 +231,16 @@ func (taskHandler *TaskHandler) eventLoop() {
             }
         }
     }
-    eventListener(TaskEvent{EventType:Destroy})
+    taskHandler.handleEvent(TaskEvent{EventType:Destroy})
     taskHandler.finishDestroyNotification <- true
+}
+
+func (taskHandler *TaskHandler) handleEvent(taskEvent TaskEvent) {
+    eventListeners := taskHandler.configuration.EventListeners
+    listener := eventListeners[taskEvent.EventType]
+    if listener != nil {
+        listener(taskEvent)
+    }
 }
 
 func (taskHandler *TaskHandler) destroy() {
