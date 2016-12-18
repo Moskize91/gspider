@@ -41,7 +41,6 @@ type task struct {
 type TaskHandler struct {
     configuration                         TaskConfiguration
     lock                                  sync.Mutex
-    handler                               func(task interface{}) error
     waitingTasksCount                     int
     planRunningThreadsCount               int
     runningThreadsCount                   int
@@ -74,11 +73,10 @@ func DefaultTaskConfiguration() TaskConfiguration {
     }
 }
 
-func CreateTaskHandler(configuration TaskConfiguration, handler func(interface{}) error) *TaskHandler {
+func CreateTaskHandler(configuration TaskConfiguration) *TaskHandler {
     configuration.EventListeners = copy(make(map[int]func(event TaskEvent)), configuration.EventListeners)
     taskHandler := &TaskHandler{
         configuration: configuration,
-        handler:  handler,
         waitingTasksCount: 0,
         planRunningThreadsCount: 0,
         runningThreadsCount: 0,
@@ -165,30 +163,33 @@ func (taskHandler *TaskHandler) scheduleLoop() {
 
         if willDeleteThread {
             select {
+            case <-taskHandler.destroyNotification:
+                taskHandler.destroy()
+                return
+
             case taskHandler.handlersChan <- task{state: deleteThread}:
                 taskHandler.planRunningThreadsCount--
 
             case waitingTasksCount <- taskHandler.waitingTasksCountIncreaseNotification:
-            case <-taskHandler.destroyNotification:
-                taskHandler.destroy()
-                return
             }
         } else if target == nil {
             select {
-            case target <- taskHandler.tasksChan:
             case <-taskHandler.destroyNotification:
                 taskHandler.destroy()
                 return
+
+            case target <- taskHandler.tasksChan:
             }
         } else {
             select {
+            case <-taskHandler.destroyNotification:
+                taskHandler.destroy()
+                return
+
             case taskHandler.handlersChan <- task{state: needHandle, target: target}:
                 taskHandler.waitingTasksCount = atomic.AddInt32(&taskHandler.waitingTasksCount, -1)
 
             case waitingTasksCount <- taskHandler.waitingTasksCountIncreaseNotification:
-            case <-taskHandler.destroyNotification:
-                taskHandler.destroy()
-                return
             }
         }
     }
