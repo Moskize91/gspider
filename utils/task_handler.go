@@ -4,7 +4,6 @@ import (
     "time"
     "sync"
     "sync/atomic"
-    "runtime"
 )
 
 type TaskConfiguration struct {
@@ -104,9 +103,6 @@ func CreateTaskHandler(configuration TaskConfiguration) *TaskHandler {
     go taskHandler.scheduleLoop()
     go taskHandler.eventLoop()
 
-    runtime.SetFinalizer(taskHandler, func() {
-        taskHandler.Destroy()
-    })
     return taskHandler
 }
 
