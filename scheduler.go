@@ -2,7 +2,6 @@ package gs
 
 import (
     "time"
-
     "github.com/moskize91/gspider/utils"
 )
 
@@ -47,8 +46,8 @@ const (
 
 type FetchResult struct {
     FetchCode int
-    Entity interface{}
-    err error
+    Entity    interface{}
+    Err       error
 }
 
 type FetchConf struct {
@@ -136,6 +135,10 @@ func CreateScheduler(
     scheduler.persistenceTaskHandler = utils.CreateTaskHandler(persistenceTaskConfiguration)
 
     return scheduler
+}
+
+func (scheduler *Scheduler) AddTask(task interface{}) {
+    scheduler.fetchTaskHandler.AddTask(task)
 }
 
 func (scheduler *Scheduler) Destroy() {

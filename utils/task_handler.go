@@ -215,6 +215,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
                 break mainLoop
 
             case taskHandler.handlersChan <- task{state: needHandle, target: target}:
+                target = nil
                 taskHandler.waitingTasksCount = atomic.AddInt32(&taskHandler.waitingTasksCount, -1)
 
             case waitingTasksCount = <-taskHandler.waitingTasksCountIncreaseNotification:
