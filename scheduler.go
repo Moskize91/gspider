@@ -137,3 +137,8 @@ func CreateScheduler(
 
     return scheduler
 }
+
+func (scheduler *Scheduler) Destroy() {
+    scheduler.persistenceTaskHandler.Destroy()
+    scheduler.fetchTaskHandler.Destroy()
+}
