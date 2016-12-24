@@ -28,15 +28,15 @@ func CreateProcessConf() ProcessConf {
 
 type TaskPoolConf struct {
     // AddTaskFunc Add a task to the pool. Can only increase count or keep count.
-    AddTaskFunc         func(task interface{})
+    AddTaskFunc         func(scheduler *Scheduler, task interface{})
     // GetTaskFunc Return task, true while the pool isn't empty. otherwise nil, false.
     // Must decrease count -1 once while success.
-    GetTaskFunc         func() (interface{}, bool)
+    GetTaskFunc         func(scheduler *Scheduler) (interface{}, bool)
     // TaskFetchNotSuccess call when task fetch not success.
-    TaskFetchNotSuccess func(task interface{}, fetchResult FetchResult)
+    TaskFetchNotSuccess func(scheduler *Scheduler, task interface{}, fetchResult FetchResult)
     // CountFunc Get current count of tasks in pool.
     // Can't modify returning value unless called GetTaskFunc or AddTaskFunc.
-    CountFunc           func() int
+    CountFunc           func(scheduler *Scheduler) int
 }
 
 const (
@@ -53,26 +53,26 @@ type FetchResult struct {
 
 type FetchConf struct {
     // FetchFunc Handle task and return fetch result.
-    FetchFunc func(task interface{}) FetchResult
+    FetchFunc func(scheduler *Scheduler, task interface{}) FetchResult
     ProcessConf ProcessConf
 }
 
 type EntityHandlerConf struct {
-    HandleEntity func(entity interface{})
+    HandleEntity func(scheduler *Scheduler, entity interface{})
 }
 
 type EntityPersistenceConf struct {
-    PersistenceEntity func(entity interface{}) error
+    PersistenceEntity func(scheduler *Scheduler, entity interface{}) error
     ProcessConf ProcessConf
 }
 
 type Scheduler struct {
     fetchTaskHandler *utils.TaskHandler
     persistenceTaskHandler *utils.TaskHandler
-    fetchFunc func(task interface{}) FetchResult
-    handleEntity func(entity interface{})
-    taskFetchNotSuccess func(task interface{}, fetchResult FetchResult)
-    persistenceEntity func(entity interface{}) error
+    fetchFunc func(scheduler *Scheduler, task interface{}) FetchResult
+    handleEntity func(scheduler *Scheduler, entity interface{})
+    taskFetchNotSuccess func(scheduler *Scheduler, task interface{}, fetchResult FetchResult)
+    persistenceEntity func(scheduler *Scheduler, entity interface{}) error
 }
 
 func CreateScheduler(
@@ -88,10 +88,16 @@ func CreateScheduler(
     }
 
     bufferConfiguration := utils.DefaultTaskBufferConfiguration()
-    bufferConfiguration.InputHandler = taskPoolConf.AddTaskFunc
-    bufferConfiguration.OutputHandler = taskPoolConf.GetTaskFunc
-    bufferConfiguration.CountFunc = taskPoolConf.CountFunc
     bufferConfiguration.BufferLength = fetchConf.ProcessConf.BufferLength
+    bufferConfiguration.InputHandler = func(target interface{}) {
+        taskPoolConf.AddTaskFunc(scheduler, target)
+    }
+    bufferConfiguration.OutputHandler = func() (interface{}, bool) {
+        return taskPoolConf.GetTaskFunc(scheduler)
+    }
+    bufferConfiguration.CountFunc = func() int {
+        return taskPoolConf.CountFunc(scheduler)
+    }
 
     fetchTaskConfiguration := utils.DefaultTaskConfiguration()
     fetchTaskConfiguration.TaskBufferConfiguration = bufferConfiguration
@@ -103,12 +109,12 @@ func CreateScheduler(
     fetchTaskConfiguration.BufferLength = 1
 
     fetchTaskConfiguration.TaskListener = func(task interface{}) (interface{}, error) {
-        result := scheduler.fetchFunc(task)
+        result := scheduler.fetchFunc(scheduler, task)
         if result.FetchCode == FetchResult_Success {
             entity := result.Entity
-            scheduler.handleEntity(entity)
+            scheduler.handleEntity(scheduler, entity)
         } else {
-            scheduler.taskFetchNotSuccess(task, result)
+            scheduler.taskFetchNotSuccess(scheduler, task, result)
         }
         return task, nil
     }
@@ -124,7 +130,7 @@ func CreateScheduler(
     persistenceTaskConfiguration.BufferLength = entityPersistenceConf.ProcessConf.BufferLength
 
     persistenceTaskConfiguration.TaskListener = func(entity interface{}) (interface{}, error) {
-        err := scheduler.persistenceEntity(entity)
+        err := scheduler.persistenceEntity(scheduler, entity)
         return entity, err
     }
     scheduler.persistenceTaskHandler = utils.CreateTaskHandler(persistenceTaskConfiguration)

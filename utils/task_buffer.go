@@ -31,14 +31,14 @@ type taskBuffer struct {
     destroyNotification       chan bool
     finishDestroyNotification chan bool
     countDidIncrease          func(delta int)
-    count                     int
+    count                     int32
     didDestroy                bool
     configuration             TaskBufferConfiguration
 }
 
 func createTaskBuffer(configuration TaskBufferConfiguration, outputChan chan interface{}, countDidIncrease func(delta int)) *taskBuffer {
     inputChan := make(chan interface{}, configuration.BufferLength)
-    buffer := taskBuffer{
+    buffer := &taskBuffer{
         inputChan: inputChan,
         outputChan: outputChan,
         destroyNotification: make(chan bool, 1),
@@ -63,7 +63,7 @@ func (buffer *taskBuffer) handleLoop() {
     for true {
         if willInputNow {
             willInputNow = false
-            if buffer.count() > 0 {
+            if buffer.bufferCount() > 0 {
                 select {
                 case <-buffer.destroyNotification:
                     return
@@ -114,18 +114,18 @@ func (buffer *taskBuffer) handleInputTarget(inputTarget interface{}) {
     inputHandler := buffer.configuration.InputHandler
     countDidIncrease := buffer.countDidIncrease
 
-    const originalCount = buffer.count()
+    originalCount := buffer.bufferCount()
     atomic.AddInt32(&buffer.count, +1)
     inputHandler(inputTarget)
-    const currentCount = buffer.count()
+    currentCount := buffer.bufferCount()
     if currentCount > originalCount {
-        countDidIncrease(currentCount - originalCount)
+        countDidIncrease((int)(currentCount - originalCount))
     }
 }
 
-func (buffer *taskBuffer) count() int {
+func (buffer *taskBuffer) bufferCount() int32 {
     if buffer.configuration.CountFunc != nil {
-        return buffer.configuration.CountFunc()
+        return int32(buffer.configuration.CountFunc())
     } else {
         return atomic.LoadInt32(&buffer.count)
     }

@@ -4,7 +4,6 @@ import (
     "time"
     "sync"
     "sync/atomic"
-    "math"
     "runtime"
 )
 
@@ -43,7 +42,7 @@ type TaskHandler struct {
     configuration                         TaskConfiguration
     buffer                                *taskBuffer
     lock                                  sync.Mutex
-    waitingTasksCount                     int
+    waitingTasksCount                     int32
     planRunningThreadsCount               int
     runningThreadsCount                   int
     runningThreadsCountLock               sync.Mutex
@@ -79,12 +78,13 @@ func DefaultTaskConfiguration() TaskConfiguration {
 
 func CreateTaskHandler(configuration TaskConfiguration) *TaskHandler {
     standardizeTaskConfiguration(&configuration)
+
     taskHandler := &TaskHandler{
         configuration: configuration,
         waitingTasksCount: 0,
         planRunningThreadsCount: 0,
         runningThreadsCount: 0,
-        latestModifyThreadsCountTimestamp: time.Now().Sub(configuration.ModifyThreadsCountTimeInterval),
+        latestModifyThreadsCountTimestamp: time.Now().Add(-configuration.ModifyThreadsCountTimeInterval),
         tasksChan: make(chan interface{}, configuration.BufferLength),
         handlersChan: make(chan task, 1),
         eventChan: make(chan TaskEvent, 10),
@@ -134,11 +134,15 @@ func (taskHandler *TaskHandler) Destroy() {
 }
 
 func standardizeTaskConfiguration(configuration *TaskConfiguration) {
-    configuration.EventListeners = copy(make(map[int]func(event TaskEvent)), configuration.EventListeners)
+    eventListeners := make(map[int]func(event TaskEvent))
+    for key, value := range configuration.EventListeners {
+        eventListeners[key] = value
+    }
+    configuration.EventListeners = eventListeners
 }
 
 func (taskHandler *TaskHandler) increaseWaitingTasksCountAndNotify(delta int) {
-    result := atomic.AddInt32(&taskHandler.waitingTasksCount, delta)
+    result := int(atomic.AddInt32(&taskHandler.waitingTasksCount, int32(delta)))
     select { // clean original notification.
     case <-taskHandler.waitingTasksCountIncreaseNotification:
     default:
@@ -154,7 +158,10 @@ func (taskHandler *TaskHandler) durationOfNextModifyThreadCountNeedWaitingFor() 
     now := time.Now()
     interval := taskHandler.configuration.ModifyThreadsCountTimeInterval
     nextTimestamp := taskHandler.latestModifyThreadsCountTimestamp.Add(interval)
-    duration := math.MaxInt64(0, nextTimestamp.Sub(now))
+    duration := nextTimestamp.Sub(now)
+    if duration < 0 {
+        duration = 0
+    }
     return duration
 }
 
@@ -195,7 +202,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
             case taskHandler.handlersChan <- task{state: deleteThread}:
                 taskHandler.planRunningThreadsCount--
 
-            case waitingTasksCount <- taskHandler.waitingTasksCountIncreaseNotification:
+            case waitingTasksCount = <-taskHandler.waitingTasksCountIncreaseNotification:
             }
         } else if target == nil {
             select {
@@ -203,7 +210,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
                 taskHandler.destroy()
                 return
 
-            case target <- taskHandler.tasksChan:
+            case target = <-taskHandler.tasksChan:
             }
         } else {
             select {
@@ -214,7 +221,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
             case taskHandler.handlersChan <- task{state: needHandle, target: target}:
                 taskHandler.waitingTasksCount = atomic.AddInt32(&taskHandler.waitingTasksCount, -1)
 
-            case waitingTasksCount <- taskHandler.waitingTasksCountIncreaseNotification:
+            case waitingTasksCount = <-taskHandler.waitingTasksCountIncreaseNotification:
             }
         }
     }
@@ -251,8 +258,8 @@ func (taskHandler *TaskHandler) eventLoop() {
         taskEvent := <-eventChan
         taskHandler.handleEvent(taskEvent)
         if taskEvent.EventType == ThreadsCountChanged {
-            var runningThreadsCount int = taskEvent.Target
-            if runningThreadsCount == 0 {
+            runningThreadsCount, ok := taskEvent.Target.(int)
+            if ok && runningThreadsCount == 0 {
                 break
             }
         }
