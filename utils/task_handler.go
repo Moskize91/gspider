@@ -170,7 +170,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
     var waitingTasksCount int
     var target interface{}
 
-    for true {
+    mainLoop: for true {
         duration := taskHandler.durationOfNextModifyThreadCountNeedWaitingFor()
         willDeleteThread := false
 
@@ -193,7 +193,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
             select {
             case <-taskHandler.destroyNotification:
                 taskHandler.destroy()
-                return
+                break mainLoop
 
             case taskHandler.handlersChan <- task{state: deleteThread}:
                 taskHandler.planRunningThreadsCount--
@@ -204,7 +204,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
             select {
             case <-taskHandler.destroyNotification:
                 taskHandler.destroy()
-                return
+                break mainLoop
 
             case target = <-taskHandler.tasksChan:
             }
@@ -212,7 +212,7 @@ func (taskHandler *TaskHandler) scheduleLoop() {
             select {
             case <-taskHandler.destroyNotification:
                 taskHandler.destroy()
-                return
+                break mainLoop
 
             case taskHandler.handlersChan <- task{state: needHandle, target: target}:
                 taskHandler.waitingTasksCount = atomic.AddInt32(&taskHandler.waitingTasksCount, -1)
@@ -229,22 +229,24 @@ func (taskHandler *TaskHandler) createNewThread() {
     eventChan := taskHandler.eventChan
     taskHandler.increaseRunningThreadsCountLock(+1)
 
-    for true {
-        task := <-taskHandler.handlersChan
-        switch task.state {
-        case needHandle:
-            eventChan <- TaskEvent{EventType:StartNewTask, Target:task.target}
-            result, err := taskListener(task.target)
-            if err != nil {
-                eventChan <- TaskEvent{EventType:TaskFailWithError, Target:err}
-            } else {
-                eventChan <- TaskEvent{EventType:CompleteTask, Target:result}
+    go func() {
+        mainLoop: for true {
+            task := <-taskHandler.handlersChan
+            switch task.state {
+            case needHandle:
+                eventChan <- TaskEvent{EventType:StartNewTask, Target:task.target}
+                result, err := taskListener(task.target)
+                if err != nil {
+                    eventChan <- TaskEvent{EventType:TaskFailWithError, Target:err}
+                } else {
+                    eventChan <- TaskEvent{EventType:CompleteTask, Target:result}
+                }
+            case deleteThread:
+                break mainLoop
             }
-        case deleteThread:
-            return
         }
-    }
-    taskHandler.increaseRunningThreadsCountLock(-1)
+        taskHandler.increaseRunningThreadsCountLock(-1)
+    }()
 }
 
 func (taskHandler *TaskHandler) eventLoop() {

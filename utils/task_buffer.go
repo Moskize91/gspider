@@ -60,13 +60,13 @@ func (buffer *taskBuffer) handleLoop() {
     var outputTarget interface{}
     var exists bool
 
-    for true {
+    mainLoop: for true {
         if willInputNow {
             willInputNow = false
             if buffer.bufferCount() > 0 {
                 select {
                 case <-buffer.destroyNotification:
-                    return
+                    break mainLoop
 
                 case inputTarget := <-buffer.inputChan:
                     buffer.handleInputTarget(inputTarget)
@@ -76,7 +76,7 @@ func (buffer *taskBuffer) handleLoop() {
             } else {
                 select {
                 case <-buffer.destroyNotification:
-                    return
+                    break mainLoop
 
                 case inputTarget := <-buffer.inputChan:
                     buffer.handleInputTarget(inputTarget)
@@ -93,7 +93,7 @@ func (buffer *taskBuffer) handleLoop() {
             if exists {
                 select {
                 case <-buffer.destroyNotification:
-                    return
+                    break mainLoop
 
                 case buffer.outputChan <- outputTarget:
                     outputTarget = nil
@@ -134,6 +134,7 @@ func (buffer *taskBuffer) bufferCount() int32 {
 func (buffer *taskBuffer) destroy() {
     if !buffer.didDestroy {
         buffer.didDestroy = true
+
         buffer.destroyNotification <- true
         <-buffer.finishDestroyNotification
     }
